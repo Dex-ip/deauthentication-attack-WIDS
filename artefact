@@ -1,0 +1,99 @@
+from scapy.all import *
+
+import subprocess
+import time
+
+# wireless interface 
+interface = "mon0"
+#trusted AP MAC addresses here should be added below
+trusted_macs = ["aa:bb:cc:dd:ee:ff", "ab:ac:ad:ae:af:ag", "ba:bc:bd:be:bf:bh"]  
+
+#tracks deauth frame from .src using Dictionary
+deauth_frame_tracker = {}
+
+# Function to check if the frame is likely spoofed
+def is_spoofed(src_mac, reason):
+    if src_mac not in trusted_macs:
+    	print("MAC not in Trusted MAC list")
+    	return True
+       
+
+    current_time = time.time()
+    if src_mac not in deauth_frame_tracker:
+        deauth_frame_tracker[src_mac] = []
+
+    deauth_frame_tracker[src_mac].append(current_time)
+    deauth_frame_tracker[src_mac] = [t for t in deauth_frame_tracker[src_mac] if current_time - t < 60]
+
+    if len(deauth_frame_tracker[src_mac]) > 20:
+        return True
+        
+    # Custom rule to check reason code
+    suspicious_reasons = [0, 6]  # Add more reason codes as needed
+    if reason in suspicious_reasons:
+        return True
+
+    return False
+
+def log_and_recommendation(frame, src_mac, spoofed, rssi):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        
+#   log_entry = f"\n" + "-"*500 + "\n" # Line breaker
+    log_entry = f"[{timestamp}] Deauthentication frame detected:\n"
+    log_entry += f"  Source MAC: {src_mac}\n"
+    log_entry += f"  RSSI: {rssi}\n"
+    log_entry += f"  Frame Summary: {frame.summary()}\n"
+    
+    if spoofed:
+        log_entry += "  Status: Spoofed frame detected\n"
+        log_entry += "  Recommendation: Investigate the source MAC address and block it if necessary.\n"
+        log_entry += "  Suggested Action: Add an iptables rule to block this MAC address.\n"
+        add_iptables_rule(src_mac)
+    else:
+        log_entry += "  Status: Legitimate frame detected\n"
+        log_entry += "  Recommendation: No immediate action required.\n"
+    
+    print(log_entry)
+
+    
+    with open("deauth_log.txt", "a") as log_file:
+        log_file.write(log_entry + "\n")
+
+def handle_deauth_frame(frame):
+    if frame.haslayer(Dot11Deauth):
+        print("_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-DEAUTHENTICATION FRAME DETECTED-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-")
+        print(frame.summary())
+
+        src_mac = frame.addr2
+        reason = frame[Dot11Deauth].reason
+        print(f"Reason: {reason}")  # Print the reason for debugging
+        spoofed = is_spoofed(src_mac, reason)
+        
+  
+
+        # Extract RSSI from Radiotap header
+        if frame.haslayer(RadioTap):
+            rssi = frame[RadioTap].dBm_AntSignal
+        else:
+            rssi = "N/A"
+        
+        log_and_recommendation(frame, src_mac, spoofed, rssi)
+        
+        frame.show()
+
+def add_iptables_rule(src_mac):
+    rule = f"sudo iptables -A INPUT -m mac --mac-source {src_mac} -j DROP"
+    subprocess.call(rule, shell=True)
+
+def monitor_traffic():
+    print(f"Monitoring deauthentication traffic on interface {interface}...")
+    sniff(iface=interface, prn=handle_deauth_frame, store=False)
+    print("Sniffing ended")
+# Set the interface to monitor mode
+subprocess.call(["sudo", "ifconfig", interface, "down"])
+#subprocess.call(["sudo", "iw", "phy", "phy3", "interface", "add", interface, "type", "monitor"])
+subprocess.call(["sudo", "iwconfig", interface, "mode", "monitor"])
+subprocess.call(["sudo", "ifconfig", interface, "up"])
+
+# Start the monitoring process
+monitor_traffic()
